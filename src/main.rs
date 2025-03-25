@@ -36,7 +36,8 @@ fn main() {
     let merkle_branch = create_taproot_address_HTLC(secret_hash, sender_pubkey, receiver_pubkey).unwrap();
     println!("Address: {:?}", merkle_branch.Address);
 
-    redeem_taproot_address_HTLC(merkle_branch,pre_image,private_key_receiver);
+    redeem_taproot_address_HTLC(&merkle_branch,pre_image,private_key_receiver);
+    refund_taproot_address_HTLC(&merkle_branch, private_key_sender);
 }
 
 //OP_PUSHBYTES_32 6d4ddc0e47d2e8f82cbe2fc2d0d749e7bd3338112cecdc76d8f831ae6620dbe0 OP_CHECKSIG // Example Spending Path
@@ -102,7 +103,7 @@ fn create_taproot_address_HTLC(secret_hash: &str, sender_pubkey: &str, receiver_
     return Some(merkle_branch);
 }
 
-fn redeem_taproot_address_HTLC(merkle_branch:MerkleBranchHTLC,preimage : &str, private_key_receiver: &str)-> Option<Address>{
+fn redeem_taproot_address_HTLC(merkle_branch:&MerkleBranchHTLC,preimage : &str, private_key_receiver: &str)-> Option<Address>{
 
     //Merkal path for spending in constrol bytes
     let hash_hex = merkle_branch.RefundScriptLeaf.to_string();
@@ -112,7 +113,7 @@ fn redeem_taproot_address_HTLC(merkle_branch:MerkleBranchHTLC,preimage : &str, p
         .expect("Hex string must be 32 bytes");
     
     let merkle_branch_redeem = TaprootMerkleBranch::decode(&hash_bytes).map_err(|e: TaprootError| format!("Failed to decode Merkle branch: {}", e)).unwrap();
-    print!("Merkle Branch: {:?}", merkle_branch_redeem);
+    // print!("Merkle Branch: {:?}", merkle_branch_redeem);
     
     //Creating Control Block
     let control_block = ControlBlock{
@@ -122,7 +123,7 @@ fn redeem_taproot_address_HTLC(merkle_branch:MerkleBranchHTLC,preimage : &str, p
         merkle_branch: merkle_branch_redeem,
     };
 
-    println!("{:?}",control_block);
+    // println!("{:?}",control_block);
 
     // Receiver's key for signing
     let secp = Secp256k1::new();
@@ -175,7 +176,9 @@ fn redeem_taproot_address_HTLC(merkle_branch:MerkleBranchHTLC,preimage : &str, p
     // Sign with Schnorr
     let key_pair = Keypair::from_secret_key(&secp,&receiver_secret_key);
     let msg = Message::from_digest_slice(&sighash[..]).unwrap();
+    // println!("msg: {:?}",msg);
     let sign = secp.sign_schnorr_no_aux_rand(&msg, &key_pair);
+    // println!("sign: {:?}",sign);
     // Construct Witness
     let mut witness = Witness::new();
     witness.push(preimage.as_bytes());                   // 1. Preimage
@@ -183,10 +186,90 @@ fn redeem_taproot_address_HTLC(merkle_branch:MerkleBranchHTLC,preimage : &str, p
     witness.push(merkle_branch.ReedeemScript.as_bytes()); // 3. Redeem script
     witness.push(&control_block.serialize());            // 4. Control block
 
-    println!("control block {:?}",witness.taproot_control_block());
+    // println!("control block {:?}",witness);
+    None
+}
 
+fn refund_taproot_address_HTLC(merkel_branch:&MerkleBranchHTLC,private_key_sender:&str) -> Option<Address>{
+    let hash_hex = merkel_branch.RedeemScriptLeaf.to_string();
+    let hash_bytes: [u8; 32] = hex::decode(hash_hex)
+        .expect("Invalid hex string")
+        .try_into()
+        .expect("Hex string must be 32 bytes");
     
+    let merkle_branch_refund = TaprootMerkleBranch::decode(&hash_bytes).map_err(|e: TaprootError| format!("Failed to decode Merkle branch: {}", e)).unwrap();
+    print!("Merkle Branch: {:?}", merkle_branch_refund);
 
+    //Creating Control Block
+    let control_block = ControlBlock{
+        leaf_version: LeafVersion::TapScript,
+        output_key_parity: merkel_branch.Parity,
+        internal_key: merkel_branch.InternalKey,
+        merkle_branch: merkle_branch_refund,
+    };
+
+    println!("{:?}",control_block);
+
+     // Receiver's key for signing
+    let secp = Secp256k1::new();
+    let sender_secret_key = SecretKey::from_str(private_key_sender).expect("Invalid private key");
+    let sender_public_key = PublicKey::from_secret_key(&secp, &sender_secret_key);
+    let sender_xonly = XOnlyPublicKey::from(sender_public_key);
+
+    // Construct a simple transaction
+    let prevout_txid = bitcoin::Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap(); // Dummy txid
+
+    // Dummy txid // Dummy txid
+    let prevout = OutPoint::new(prevout_txid, 0); // Assume vout 0
+    let input = TxIn {
+        previous_output: prevout,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME, // RBF enabled, no locktime
+        witness: Witness::default(),
+    };
+ 
+    let address: Address<NetworkUnchecked> = "32iVBEu4dxkUQk9dJbZUiBiQdmypcEyJRf".parse().unwrap();
+    let address: Address<NetworkChecked> = address.require_network(Network::Bitcoin).unwrap();
+ 
+ 
+    let output = TxOut {
+        value: Amount::from_sat(100_000), // 0.001 BTC (example amount)
+        script_pubkey: address.script_pubkey(), // Dummy destination
+    };
+ 
+     
+    let mut tx = Transaction {
+         version: bitcoin::transaction::Version::TWO,
+         lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+         input: vec![input],
+         output: vec![output],
+    };
+
+    // Compute TapSighash
+    let mut sighash_cache = SighashCache::new(&tx);
+    let sighash = sighash_cache.taproot_script_spend_signature_hash(
+        0, // Input index
+        &bitcoin::sighash::Prevouts::All(&[TxOut {
+            value: Amount::from_sat(200_000), // Previous output amount (example)
+            script_pubkey: merkel_branch.Address.script_pubkey(),
+        }]),
+        TapLeafHash::from_script(&merkel_branch.RefundScript, LeafVersion::TapScript),
+        TapSighashType::Default,
+    ).expect("Failed to compute sighash");
+
+    // Sign with Schnorr
+    let key_pair = Keypair::from_secret_key(&secp,&sender_secret_key);
+    let msg = Message::from_digest_slice(&sighash[..]).unwrap();
+    // println!("msg: {:?}",msg);
+    let sign = secp.sign_schnorr_no_aux_rand(&msg, &key_pair);
+    // println!("sign: {:?}",sign);
+    // Construct Witness
+    let mut witness = Witness::new();                // 1. Preimage
+    witness.push(sign.as_ref());                    // 2. Schnorr signature
+    witness.push(merkel_branch.RefundScript.as_bytes()); // 3. Redeem script
+    witness.push(&control_block.serialize());            // 4. Control block
+    
+    println!("Witness :{:?}",witness);
 
     None
 }
