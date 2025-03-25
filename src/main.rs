@@ -63,6 +63,7 @@ fn create_taproot_htlc(secret_hash: &str, sender_pubkey: &str, receiver_pubkey: 
 
     // Refund script: <timelock> OP_CHECKSEQUENCEVERIFY OP_DROP <sender_pubkey> OP_CHECKSIG
     let refund_script_hex = format!("030e0040b27520{}ac", sender_pubkey); // 14 units timelock (~2 hours)
+    // let refund_script_hex = format!("03010000b27520{}ac", sender_pubkey);
     let refund_script_bytes = hex::decode(refund_script_hex).expect("Invalid refund script hex");
     let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
 
@@ -117,7 +118,7 @@ fn redeem_taproot_htlc(htlc: &TaprootHTLC, preimage: &str, receiver_private_key:
     let key_pair = Keypair::from_secret_key(&secp, &receiver_secret_key);
 
     // Construct a basic transaction
-    let prevout_txid = bitcoin::Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+    let prevout_txid = bitcoin::Txid::from_str("759262674c73539823c17206495a47f42b1c28bb3218c2321e67e14dd58d6858").unwrap();
     let prevout = OutPoint::new(prevout_txid, 0);
     let input = TxIn {
         previous_output: prevout,
@@ -126,10 +127,10 @@ fn redeem_taproot_htlc(htlc: &TaprootHTLC, preimage: &str, receiver_private_key:
         witness: Witness::default(),
     };
 
-    let output_address: Address<NetworkUnchecked> = "32iVBEu4dxkUQk9dJbZUiBiQdmypcEyJRf".parse().unwrap();
-    let output_address = output_address.require_network(Network::Bitcoin).unwrap();
+    let output_address: Address<NetworkUnchecked> = "tb1q96nq377kphel5ru9rf5f6nh2lqdsxz25h79lxa".parse().unwrap();
+    let output_address = output_address.require_network(Network::Testnet).unwrap();
     let output = TxOut {
-        value: Amount::from_sat(100_000), // 0.001 BTC
+        value: Amount::from_sat(700), // 0.001 BTC
         script_pubkey: output_address.script_pubkey(),
     };
 
@@ -145,7 +146,7 @@ fn redeem_taproot_htlc(htlc: &TaprootHTLC, preimage: &str, receiver_private_key:
     let sighash = sighash_cache.taproot_script_spend_signature_hash(
         0,
         &bitcoin::sighash::Prevouts::All(&[TxOut {
-            value: Amount::from_sat(200_000), // Previous output amount
+            value: Amount::from_sat(900), // Previous output amount
             script_pubkey: htlc.address.script_pubkey(),
         }]),
         TapLeafHash::from_script(&htlc.redeem_script, LeafVersion::TapScript),
@@ -162,6 +163,13 @@ fn redeem_taproot_htlc(htlc: &TaprootHTLC, preimage: &str, receiver_private_key:
     witness.push(signature.as_ref());              // Schnorr signature
     witness.push(htlc.redeem_script.as_bytes());   // Redeem script
     witness.push(&control_block.serialize());      // Control block
+
+    tx.input[0].witness = witness;
+
+    let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+    println!("tx_hex {}",tx_hex);
+
+    
 
     None // Placeholder return (could return the output address if needed)
 }
@@ -188,15 +196,15 @@ fn refund_taproot_htlc(htlc: &TaprootHTLC, sender_private_key: &str) -> Option<A
         internal_key: htlc.internal_key,
         merkle_branch,
     };
-    println!("Control Block: {:?}", control_block);
+    // println!("Control Block: {:?}", control_block);
 
     // Derive sender's keypair for signing
     let sender_secret_key = SecretKey::from_str(sender_private_key).expect("Invalid private key");
     let key_pair = Keypair::from_secret_key(&secp, &sender_secret_key);
 
     // Construct a basic transaction
-    let prevout_txid = bitcoin::Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
-    let prevout = OutPoint::new(prevout_txid, 0);
+    let prevout_txid = bitcoin::Txid::from_str("76785f45d5b7ee248b0ca4d7612a9055ce8dc82c9c0573786743532ce7425ad6").unwrap();
+    let prevout = OutPoint::new(prevout_txid, 1);
     let input = TxIn {
         previous_output: prevout,
         script_sig: ScriptBuf::new(),
@@ -204,10 +212,10 @@ fn refund_taproot_htlc(htlc: &TaprootHTLC, sender_private_key: &str) -> Option<A
         witness: Witness::default(),
     };
 
-    let output_address: Address<NetworkUnchecked> = "32iVBEu4dxkUQk9dJbZUiBiQdmypcEyJRf".parse().unwrap();
-    let output_address = output_address.require_network(Network::Bitcoin).unwrap();
+    let output_address: Address<NetworkUnchecked> = "tb1q96nq377kphel5ru9rf5f6nh2lqdsxz25h79lxa".parse().unwrap();
+    let output_address = output_address.require_network(Network::Testnet).unwrap();
     let output = TxOut {
-        value: Amount::from_sat(100_000), // 0.001 BTC
+        value: Amount::from_sat(700), // 0.001 BTC
         script_pubkey: output_address.script_pubkey(),
     };
 
@@ -223,7 +231,7 @@ fn refund_taproot_htlc(htlc: &TaprootHTLC, sender_private_key: &str) -> Option<A
     let sighash = sighash_cache.taproot_script_spend_signature_hash(
         0,
         &bitcoin::sighash::Prevouts::All(&[TxOut {
-            value: Amount::from_sat(200_000), // Previous output amount
+            value: Amount::from_sat(900), // Previous output amount
             script_pubkey: htlc.address.script_pubkey(),
         }]),
         TapLeafHash::from_script(&htlc.refund_script, LeafVersion::TapScript),
@@ -239,7 +247,14 @@ fn refund_taproot_htlc(htlc: &TaprootHTLC, sender_private_key: &str) -> Option<A
     witness.push(signature.as_ref());             // Schnorr signature
     witness.push(htlc.refund_script.as_bytes());  // Refund script
     witness.push(&control_block.serialize());     // Control block
-    println!("Witness: {:?}", witness);
+    // println!("Witness: {:?}", witness);
+
+    tx.input[0].witness = witness;
+
+
+    let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+    println!("tx_hex {}",tx_hex);
 
     None // Placeholder return (could return the output address if needed)
 }
+
