@@ -20,10 +20,10 @@ use rand::Rng;
 use bitcoincore_rpc::bitcoin::CompressedPublicKey;
 use bitcoincore_rpc::json::EstimateMode;
 use bitcoincore_rpc::bitcoin::transaction::Version;
-use bitcoincore_rpc::bitcoin::absolute::LockTime;
 use bitcoincore_rpc::bitcoin::consensus::encode::serialize_hex;
 use bitcoin::taproot::{ControlBlock, LeafVersion, TapLeafHash, TaprootError, TaprootMerkleBranch};
 use bitcoin::EcdsaSighashType;
+use bitcoin::absolute::{LockTime,Time};
 
 
 
@@ -381,7 +381,7 @@ fn main() -> bitcoincore_rpc::Result<()> {
     println!("Signed transaction hex (recipient1 -> recipient2): {}", tx_hex);
 
     // Broadcast the transaction to the network
-    let txid = rpc.send_raw_transaction(&tx)?;
+    let txid_prv = rpc.send_raw_transaction(&tx)?;
     println!("Transaction successfully broadcast! TXID: {}", txid);
 
     // Mine a block to confirm the transaction
@@ -392,25 +392,37 @@ fn main() -> bitcoincore_rpc::Result<()> {
     let balance_recipient1 = get_address_balance_scan(&rpc, &recipient1_address).unwrap();
     let htlc_contract_balance = get_address_balance_scan(&rpc, &htlc.address).unwrap();
     println!("Final balance of recipient1: {} BTC", balance_recipient1);
-    println!("Final balance of recipient2: {} BTC", htlc_contract_balance);
+    println!("Final balance of htlc_contract: {} BTC", htlc_contract_balance);
 
-    //redeeming
-    let redeem_hex = redeem_taproot_htlc(&htlc, preimage, receiver_private_key, txid,redeem_amount,&recipient1_address  ).unwrap();
-    let txid = rpc.send_raw_transaction(&redeem_hex)?;
-    println!("Transaction successfully broadcast! TXID: {}", txid);
+    // //***************** redeeming ******************
+    // let redeem_hex = redeem_taproot_htlc(&htlc, preimage, receiver_private_key, txid_prv,redeem_amount,&recipient1_address  ).unwrap();
+    // let txid = rpc.send_raw_transaction(&redeem_hex)?;
+    // println!("Transaction successfully broadcast! TXID: {}", txid);
 
-    //Mining one block
-    let block_hashes = rpc.generate_to_address(1, &minner_address)?;
-    println!("Mined a block to confirm the redeem transaction: {}", block_hashes.last().unwrap());
+    // //Mining one block
+    // let block_hashes = rpc.generate_to_address(1, &minner_address)?;
+    // println!("Mined a block to confirm the redeem transaction: {}", block_hashes.last().unwrap());
 
     //Checking Balance 
     let htlc_balance = get_address_balance_scan(&rpc, &htlc.address).unwrap();
     let redeem_balance = get_address_balance_scan(&rpc,&recipient1_address).unwrap();
 
     println!("balance of htlc contract {}",htlc_balance);
-    println!("balance of the redeem_balance {}",redeem_balance);
-    
+    println!("balance of the redeem_balance: {}",redeem_balance);
 
+    //******************** Refund *******************
+    //Mining to block to test refund
+    let block_hashes = rpc.generate_to_address(6, &minner_address)?;
+    let refund_hex = refund_taproot_htlc(&htlc, sender_private_key,txid_prv,redeem_amount, &recipient1_address).unwrap();
+    let txid = rpc.send_raw_transaction(&refund_hex)?;
+    println!("Transaction successfully broadcast! TXID: {}", txid);
+    //adding refund trc to the block 
+    let block_hashes = rpc.generate_to_address(1, &minner_address)?;
+    //Checking balance 
+    let htlc_balance = get_address_balance_scan(&rpc, &htlc.address).unwrap();
+    let refund_balance = get_address_balance_scan(&rpc,&recipient1_address).unwrap();
+    println!("balance of htlc contract {}",htlc_balance);
+    println!("balance of the refund_balance: {}",refund_balance);
     Ok(())
 }
 
@@ -446,11 +458,21 @@ fn create_taproot_htlc(secret_hash: &str, sender_pubkey: &str, receiver_pubkey: 
 
 
     // Refund script: <timelock> OP_CHECKSEQUENCEVERIFY OP_DROP <sender_pubkey> OP_CHECKSIG
-    let refund_script_hex = format!("030e0040b27520{}ac", sender_pubkey); // 14 units timelock (~2 hours)
+    // let refund_script_hex = format!("030e0040b27520{}ac", sender_pubkey); // 14 units timelock (~2 hours)
     // let refund_script_hex = format!("03010000b27520{}ac", sender_pubkey);
-    let refund_script_bytes = hex::decode(refund_script_hex).expect("Invalid refund script hex");
-    let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
+    // let refund_script_bytes = hex::decode(refund_script_hex).expect("Invalid refund script hex");
+    // let refund_script = ScriptBuf::from_bytes(refund_script_bytes)
 
+    let lock_time = 7; //Redeem at 7 blocks or 7*512 seconds
+    let refund_script_builder = ScriptBuf::builder()
+    .push_int(lock_time)
+    .push_opcode(opcodes::all::OP_CSV)
+    .push_opcode(opcodes::all::OP_DROP)
+    .push_x_only_key(&sender_xonly)
+    .push_opcode(opcodes::all::OP_CHECKSIG);
+
+    let refund_script = refund_script_builder.into_script();
+    println!("Refundscrip : {}",refund_script);
     // Create TapLeaf hashes for both scripts
     let leaf_version = LeafVersion::TapScript;
     let redeem_leaf = TapNodeHash::from_script(&redeem_script, leaf_version);
@@ -553,3 +575,87 @@ fn redeem_taproot_htlc(htlc: &TaprootHTLC, preimage: &str, receiver_private_key:
     
     return Some(tx); // Placeholder return (could return the output address if needed)
 }
+
+fn refund_taproot_htlc(htlc: &TaprootHTLC, sender_private_key: &str,prev_txid:Txid, refund_amount: Amount,redeem_to_address:&Address) -> Option<Transaction> {
+    let secp = Secp256k1::new();
+
+    // Compute Merkle branch for refund path (using redeem leaf as sibling)
+    let hash_hex = htlc.redeem_leaf.to_string();
+    let hash_bytes: [u8; 32] = hex::decode(hash_hex)
+        .expect("Invalid hex string")
+        .try_into()
+        .expect("Hex string must be 32 bytes");
+    let merkle_branch = TaprootMerkleBranch::decode(&hash_bytes)
+        .map_err(|e: TaprootError| format!("Failed to decode Merkle branch: {}", e))
+        .unwrap();
+    println!("Merkle Branch: {:?}", merkle_branch);
+
+    // Create control block for Taproot script spend
+    let control_block = ControlBlock {
+        leaf_version: LeafVersion::TapScript,
+        output_key_parity: htlc.parity,
+        internal_key: htlc.internal_key,
+        merkle_branch,
+    };
+    // println!("Control Block: {:?}", control_block);
+
+    // Derive sender's keypair for signing
+    let sender_secret_key = SecretKey::from_str(sender_private_key).expect("Invalid private key");
+    let key_pair = Keypair::from_secret_key(&secp, &sender_secret_key);
+
+    // Construct a basic transaction
+    let prevout_txid = prev_txid;
+    let prevout = OutPoint::new(prevout_txid, 0);
+    let input = TxIn {
+        previous_output: prevout,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::from_height(7), // Note: Should reflect timelock in practice
+        witness: Witness::default(),
+    };
+
+    let output = TxOut {
+        value: refund_amount-Amount::from_sat(1000), // 0.001 BTC
+        script_pubkey: redeem_to_address.script_pubkey(),
+    };
+
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+        input: vec![input],
+        output: vec![output],
+    };
+
+    // Compute Taproot sighash for script spend
+    let mut sighash_cache = SighashCache::new(&tx);
+    let sighash = sighash_cache.taproot_script_spend_signature_hash(
+        0,
+        &bitcoin::sighash::Prevouts::All(&[TxOut {
+            value: refund_amount, // Previous output amount
+            script_pubkey: htlc.address.script_pubkey(),
+        }]),
+        TapLeafHash::from_script(&htlc.refund_script, LeafVersion::TapScript),
+        TapSighashType::Default,
+    ).expect("Failed to compute sighash");
+
+    // Sign the transaction with Schnorr
+    let msg = Message::from_digest_slice(&sighash[..]).unwrap();
+    let signature = secp.sign_schnorr_no_aux_rand(&msg, &key_pair);
+
+    // Construct witness for refund path
+    let mut witness = Witness::new();
+    witness.push(signature.as_ref());             // Schnorr signature
+    witness.push(htlc.refund_script.as_bytes());  // Refund script
+    witness.push(&control_block.serialize());     // Control block
+    // println!("Witness: {:?}", witness);
+
+    tx.input[0].witness = witness;
+
+
+    // let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+    // println!("tx_hex {}",tx_hex);
+
+    return Some(tx);
+}
+
+
+
